@@ -1,0 +1,3 @@
+#don't store object files
+*.o
+*.DS_Store

@@ -1,0 +1,87 @@
+<head>
+  <script>
+  	var initialConnect = false;
+	  var pollSeconds = 2000;
+		var reconnectTimeout = 10*1000;
+  	window.onload = function() {
+    	init(true, false);
+  	};
+
+		var apiCall = function(route, method, data, async, successCb, errorCb) {
+    	var xhttp = new XMLHttpRequest();
+    	xhttp.onreadystatechange = function() {
+    		if (xhttp.readyState == 4 && xhttp.status == 200)
+    		if (successCb) successCb(xhttp.responseText);
+    		else if (xhttp.readyState == 4)
+    		if (errorCb) errorCb(xhttp.responseText);
+    	}
+    	xhttp.open(method, route, async);
+    	xhttp.send(data);
+    }
+    var latestFile = "";
+  	var lastImgNode = null;
+		var postNewImg = function(path, incremental) {
+  		console.log("path:" + path);
+			if (incremental && path <= latestFile) return false;                       
+      var newImg = document.createElement("img");
+      newImg.src = path;
+      if (incremental) {
+        document.body.insertBefore(newImg, lastImgNode);
+        lastImgNode = newImg;
+        latestFile = path;
+      }
+      else {
+        var title = document.body.firstChild;
+			  if (!lastImgNode){
+          lastImgNode = newImg;
+          latestFile = path;
+        }
+        document.body.appendChild(newImg);
+      }
+      return true;
+    };
+
+		var init = function(flip, incremental) {
+      var send = {
+        'last': latestFile
+      };
+      var url = '/all';
+      url += (flip) ? '?newest' : '';
+    	apiCall(url, 'POST', send, true, function(resp) {
+        initialConnect = true;
+        var data = JSON.parse(resp);
+        for (var i = 0; i < data.count; i++) {
+          if (!postNewImg(data.files[i], incremental)) break;
+        }
+        setTimeout(function() {
+          init(true, true);
+        }, pollSeconds);
+        
+    	}, function() {
+        setTimeout(function() {
+          if (initialConnect) init(true, true);
+          else init(true, false);
+        }, reconnectTimeout);
+      });
+    };
+
+  </script>
+  <style>
+    body {
+    	background-color: black;
+    	color: white;
+      text-align: center;
+    }
+    img {
+    	display: block;
+    	max-width: 480px;
+    	width: 100%;
+    	height: auto;
+    	margin-right: auto;
+    	margin-left: auto;
+    }
+  </style>
+</head>
+<body>
+  <h2>Newest Doodles...</h2>
+</body>
