@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <time.h>
 #include <syslog.h>
+#include "button.h"
 //#include <system.h>
 
 //#define FPRINTF(stream, fmt, ...) fprintf(stream, fmt, ##__VA_ARGS__)
@@ -19,8 +20,15 @@
 #define DRAWCOLOR RGB15(31,63,31)
 #define BGCOLOR RGB15(0,0,0)
 #define FONTCOLOR RGB15(31, 63, 31)
+#define BUTTON_BG_COL RGB15(0, 0, 15)
+#define BUTTON_FG_COL RGB15(31, 63, 0)
 //shut backlight off after 120 seconds
 #define SLEEP_AFTER 120
+
+#define CURCOL_SQR_WD 28
+#define CURCOL_SQR_HT 28
+#define CURCOL_X 272
+#define CURCOL_Y (SCREEN_HEIGHT - 30)
 
 
 typedef enum PRGM_STATE {
@@ -34,15 +42,75 @@ static FNTObj_t ArialFont;
 
 static GFXObj_t ToolBar = {0};
 static GFXObj_t Drawing = {0};
-static GFXObj_t SaveScreen = {0};
+static GFXObj_t MsgScreen = {0};
 static GFXObj_t ColorWheel = {0};
-static GFXObj_t placeButton = {0};
-static GFXObj_t cancelButton = {0};
-static GFXObj_t eraser = {0};
+static GFXObj_t Eraser = {0};
+static GFXObj_t CurrentColSquare = {0};
+
+static Button_t OKButton = {.font = &ArialFont};
+static Button_t CancelButton = {.font = &ArialFont};
+
 
 static char rootPath[PATH_MAX];
 static char saveDir[PATH_MAX];
 
+static void loadGfx(GFXObj_t *gfx, char *relpath) {
+  char tempPathBuf[PATH_MAX];
+  snprintf(tempPathBuf, PATH_MAX, "%s/%s", rootPath, relpath);
+  if( BAG_Display_LoadObj(tempPathBuf, gfx) != ERR_NONE) {
+    BAG_DBG_Msg("error loading %s\n", tempPathBuf);
+    BAG_Exit(0);
+  }
+}
+
+static void loadFnt(FNTObj_t *fnt, char *relpath) {
+  char tempPathBuf[PATH_MAX];
+  snprintf(tempPathBuf, PATH_MAX, "%s/%s", rootPath, relpath);
+  if(BAG_Font_Load(tempPathBuf, &ArialFont) != ERR_NONE) {
+    BAG_DBG_Msg("error loading %s\n", tempPathBuf);
+    BAG_Exit(0);
+  }
+  BAG_Font_SetFontColor(&ArialFont, FONTCOLOR);
+}
+
+static void createMessage(char *message) {
+  if (!MsgScreen.buffer.gfx)
+    BAG_Display_CreateObj(&MsgScreen, 16, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT);
+  
+  wString msgText;
+  wString_new(&msgText);
+  msgText.printf(&msgText, message);
+  TextBox_t ScreenBox = {
+    0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, ALIGN_CENTER, WRAP_WORD, TBOX_WHOLESTR
+  };
+  BAG_Draw_Rect(MsgScreen.buffer.gfx, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, RGB15(0,0,0));
+  BAG_Font_Print2(MsgScreen.buffer.gfx, &ScreenBox, &msgText, &ArialFont);
+  msgText.del(&msgText);
+}
+
+static void drawMessageScreen(void) {
+  memcpy(BAG_GetScreen(), MsgScreen.buffer.gfx, SCREEN_SIZE);
+}
+
+static char loadResources(void) {
+  loadFnt(&ArialFont, "graphics/arial_uni.fnt");
+  //load graphics
+  loadGfx(&ToolBar, "graphics/toolbar.bmp");
+  loadGfx(&ColorWheel, "graphics/colorwheel.bmp");
+  loadGfx(&Eraser, "graphics/eraser.png");
+
+  //disable using transparent color, 32bits have an alpha value to use
+  BAG_Display_UseTransparentColor(&ColorWheel, 0);
+  BAG_Display_CreateObj(&Drawing, 16, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT);
+
+  //set up the currently selected color box
+  BAG_Display_CreateObj(&CurrentColSquare, 16, CURCOL_SQR_WD, CURCOL_SQR_HT, CURCOL_SQR_WD, CURCOL_SQR_HT);
+  BAG_Display_UseTransparentColor(&CurrentColSquare, 0);
+  
+  //make some buttons
+  Button_Create(SCREEN_HEIGHT>>3, 40, "Yes", &OKButton);
+  Button_Create(SCREEN_HEIGHT>>3, 40, "No", &CancelButton);
+}
 
 
 
@@ -53,7 +121,7 @@ static char isGfxTouched(GFXObj_t *gfx) {
   int x2 = x + *BAG_Display_GetGfxWidth(gfx),
     	y2 = y + *BAG_Display_GetGfxHeight(gfx);
 
-  return BAG_StylusZone(x, y, x2, y2);
+  return Stylus.Newpress && BAG_StylusZone(x, y, x2, y2);
 }
 
 void StylusDraw(unsigned short *dest, int destWd, int destHt, unsigned short color, int draw_size) {
@@ -85,37 +153,37 @@ void StylusDraw(unsigned short *dest, int destWd, int destHt, unsigned short col
   oldDownTime = Stylus.Downtime;
 }
 
-
-
 static char showToolBar(char show) {
   switch(show) {
   case 1:
     //show the tool bar
     memcpy(Drawing.buffer.gfx, BAG_GetScreen(), SCREEN_SIZE);
-    //    BAG_Update();BAG_Update();
     break;
   case 0:
     //hide toolbar
     memcpy(BAG_GetScreen(), Drawing.buffer.gfx, SCREEN_SIZE);
-    //BAG_Update();BAG_Update();
     break;
   }
-
   return show;
 }
 
+static void drawCurColSqr(unsigned short color) {
+  int wd = *BAG_Display_GetGfxWidth(&CurrentColSquare);
+  int ht = *BAG_Display_GetGfxHeight(&CurrentColSquare);
+  BAG_Draw_Rect(CurrentColSquare.buffer.gfx, wd, ht, 0, 0, wd, ht, RGB15(0,0,0));
+  BAG_Draw_Rect(CurrentColSquare.buffer.gfx, wd, ht, 2, 2, wd - 2, ht - 2, color);
+  BAG_Display_DrawObjFast(&CurrentColSquare, BAG_GetScreen(), CURCOL_X, CURCOL_Y);  
+}
 
 static void drawToolBar(unsigned short color) {
-  //update color on tool bar
-  BAG_Draw_Rect(ToolBar.buffer.gfx, ToolBar.data.width, ToolBar.data.height, 272, 6, 293, 26, color);
   //refresh toolbar
   BAG_Display_DrawObjFast(&ToolBar, BAG_GetScreen(), 0, SCREEN_HEIGHT - ToolBar.data.height);
-  BAG_Display_DrawObj(&eraser, BAG_GetScreen(), 272 - 40, SCREEN_HEIGHT - ToolBar.data.height + 6);
+  drawCurColSqr(color);
+  BAG_Display_DrawObj(&Eraser, BAG_GetScreen(), 272 - 40, SCREEN_HEIGHT - ToolBar.data.height + 6);
 }
 
 
 static void clearScreen(void) {
-
   BAG_Update();
   BAG_ClearScreen(BGCOLOR);
   BAG_Update();
@@ -123,9 +191,39 @@ static void clearScreen(void) {
   showToolBar(1);
 }
 
+static int confirmationMenu(char *msg) {
+  createMessage(msg);
+  drawMessageScreen();
+  Button_Draw(&OKButton, SCREEN_WIDTH>>2, SCREEN_HEIGHT/2 + (SCREEN_HEIGHT/4),
+              BUTTON_BG_COL, BUTTON_FG_COL);
+  Button_Draw(&CancelButton, SCREEN_WIDTH/2 + SCREEN_WIDTH/4, SCREEN_HEIGHT/2 + (SCREEN_HEIGHT/4),
+              BUTTON_BG_COL, BUTTON_FG_COL);
+
+  int status = 0;
+  while (1) {
+
+    if (Button_isTouched(&OKButton))
+      break;
+    else if (Button_isTouched(&CancelButton)) {
+      status = -1;
+      break;
+    }
+
+    BAG_Update();
+  }
+  return status;
+}
 
 static void saveNote(void) {
-  memcpy(BAG_GetScreen(), SaveScreen.buffer.gfx, SCREEN_SIZE);
+  //check with user first before posting
+  if (confirmationMenu("Are you ready to share this doodle?")) {
+    showToolBar(0);
+    return;
+  }
+  
+  createMessage("Posting Doodle...");
+  drawMessageScreen();
+
   char savename[PATH_MAX];
   snprintf(savename, PATH_MAX, "%lu", (unsigned long)time(NULL));
   BAG_Display_GfxToBitmapFile(&Drawing, saveDir, savename);
@@ -133,191 +231,123 @@ static void saveNote(void) {
   showToolBar(0);
 }
 
-
-void loadGfx(GFXObj_t *gfx, char *relpath) {
-  char tempPathBuf[PATH_MAX];
-  snprintf(tempPathBuf, PATH_MAX, "%s/%s", rootPath, relpath);
-  if( BAG_Display_LoadObj(tempPathBuf, gfx) != ERR_NONE) {
-    BAG_DBG_Msg("error loading %s\n", tempPathBuf);
-    BAG_Exit(0);
-  }
-}
-
-void loadFnt(FNTObj_t *fnt, char *relpath) {
-  char tempPathBuf[PATH_MAX];
-  snprintf(tempPathBuf, PATH_MAX, "%s/%s", rootPath, relpath);
-  if(BAG_Font_Load(tempPathBuf, &ArialFont) != ERR_NONE) {
-    BAG_DBG_Msg("error loading %s\n", tempPathBuf);
-    BAG_Exit(0);
-  }
-  BAG_Font_SetFontColor(&ArialFont, FONTCOLOR);
-}
-  
-
 void setbacklight(int on) {
   char tempPathBuf[PATH_MAX];
   snprintf(tempPathBuf, PATH_MAX, "sudo %s/set_screen.sh \"%s\"", rootPath, (on) ? "on" : "0");
   syslog(LOG_INFO, "Command: %s\n", tempPathBuf);
   system(tempPathBuf);
-  /*  FILE *f = fopen("/sys/class/backlight/soc\\:backlight/brightness", "r");
-  if (!f) {
-    syslog(LOG_INFO, "error opening backlight file");
-    return;
-  }
-
-  if (on) fprintf(f, "1");
-  else fprintf(f, "0");
-  fclose(f);*/
-
 }
 
 
 int main(int argc, char *argv[]){
-
   //get directory that this binary is running in
   readlink("/proc/self/exe", rootPath, PATH_MAX);
   char *dirEnd = strrchr(rootPath, '/');
   if (dirEnd) *dirEnd = '\0';
-
 
   if(!BAG_Init(1)){
     printf("Init error...\n");
     BAG_Exit(0);
   }
 
-
-  char tempPathBuf[PATH_MAX];
   BAG_Core_SetFPS(FRAME_RATE);
-
   BAG_DBG_Init(NULL, DBG_ENABLE | DBG_LIB);
-  loadFnt(&ArialFont, "graphics/arial_uni.fnt");
   
-  //load graphics
-  loadGfx(&ToolBar, "graphics/toolbar.bmp");
-  loadGfx(&ColorWheel, "graphics/colorwheel.bmp");
-  loadGfx(&eraser, "graphics/eraser.png");
-
-  //disable using transparent color, 32bits have an alpha value to use
-  BAG_Display_UseTransparentColor(&ColorWheel, 0);
-  BAG_Display_CreateObj(&Drawing, 16, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT);
-
-  //generate save screen
-  BAG_Display_CreateObj(&SaveScreen, 16, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT);
-  
-  wString SaveText;
-  wString_new(&SaveText);
-  SaveText.printf(&SaveText, "Posting doodle...");
-  TextBox_t ScreenBox = {
-    0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, ALIGN_CENTER, WRAP_WORD, TBOX_WHOLESTR
-  };
-  BAG_Draw_Rect(SaveScreen.buffer.gfx, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, RGB15(0,0,0));
-  BAG_Font_Print2(SaveScreen.buffer.gfx, &ScreenBox, &SaveText, &ArialFont);
-  
-  //load place note button
-  loadGfx(&placeButton, "graphics/okbutton.png");
-  loadGfx(&cancelButton, "graphics/cancelbutton.png");
-
+  loadResources();
   clearScreen();
 
   int colorCounter = 0, drawSize = 2;
   unsigned short curColor = DRAWCOLOR;
   int prgmState = STATE_MENU;
-
-  snprintf(saveDir, PATH_MAX, "%s/%s", rootPath, SAVE_DIR);
-
   int blankScreen = 0;
   time_t lastTouch = time(NULL);
+  snprintf(saveDir, PATH_MAX, "%s/%s", rootPath, SAVE_DIR);
+  
   while(1) {
-    if (!blankScreen) {
-      time_t curTime = time(NULL);
-      if (curTime - lastTouch > SLEEP_AFTER) {
-        syslog(LOG_INFO, "SLEEPING SCREEN");
-        setbacklight(0);
-        blankScreen = 1;
-      }
-    } else if (Stylus.Newpress) {
-      lastTouch = time(NULL);
+    if (Stylus.Newpress || Stylus.Held) lastTouch = time(NULL);
+    else if (!blankScreen && time(NULL) - lastTouch > SLEEP_AFTER) {
+      syslog(LOG_INFO, "SLEEPING SCREEN");
+      setbacklight(0);
+      blankScreen = 1;
+    } else if (blankScreen && time(NULL) - lastTouch < SLEEP_AFTER) {
       syslog(LOG_INFO, "WAKING SCREEN");
       setbacklight(1);
       blankScreen = 0;
     }
 
-    
-    if (Stylus.Newpress && BAG_StylusZone(0, 0, 20, 20)) {
+    switch(prgmState) {
+
+      /*User is Currently Drawing...*/
+    case STATE_DRAWING:
+      StylusDraw(BAG_GetScreen(), SCREEN_WIDTH, SCREEN_HEIGHT, curColor, drawSize);
+      if(Stylus.Released) {
+        //copy image before it gets destroyed
+        showToolBar(1);
+        prgmState = STATE_MENU;
+      }
       break;
-    }
-    else {
-      switch(prgmState) {
-
-      case STATE_DRAWING:
-        StylusDraw(BAG_GetScreen(), SCREEN_WIDTH, SCREEN_HEIGHT, curColor, drawSize);
-        if(Stylus.Released) {
-          //copy image before it gets destroyed
-          showToolBar(1);
-          prgmState = STATE_MENU;
-        }
-        break;
-      case STATE_MENU:
-
-        drawToolBar(curColor);
-        //user starts drawing again, hide toolbar
-        if(Stylus.Newpress && !BAG_StylusZone(0, SCREEN_HEIGHT - ToolBar.data.height, SCREEN_WIDTH, SCREEN_HEIGHT)){
-          showToolBar(0);
-          prgmState = STATE_DRAWING;
-        }
-        //user hits save
-        else if (Stylus.Newpress &&
-                 BAG_StylusZone(SCREEN_WIDTH - 74, SCREEN_HEIGHT - ToolBar.data.height, SCREEN_WIDTH, SCREEN_HEIGHT))
+      
+      /*Stylus is off the screen and or re-entered in toolbar area*/
+    case STATE_MENU:
+      drawToolBar(curColor);
+      //user starts drawing again, hide toolbar
+      if(Stylus.Newpress && !BAG_StylusZone(0, SCREEN_HEIGHT - ToolBar.data.height, SCREEN_WIDTH, SCREEN_HEIGHT)){
+        showToolBar(0);
+        prgmState = STATE_DRAWING;
+      }
+      //user hits save
+      else if (Stylus.Newpress &&
+               BAG_StylusZone(SCREEN_WIDTH - 74, SCREEN_HEIGHT - ToolBar.data.height, SCREEN_WIDTH, SCREEN_HEIGHT))
         {
           saveNote();
         }
 
-        //user hits clear
-        else if (Stylus.Newpress && BAG_StylusZone(0, SCREEN_HEIGHT - ToolBar.data.height, 74, SCREEN_HEIGHT)) {
-          clearScreen();
-        }
-        //user wants new color
-        else if (Stylus.Newpress && BAG_StylusZone(271, SCREEN_HEIGHT - ToolBar.data.height, 292, SCREEN_HEIGHT)) {
-          prgmState = STATE_COLORWHEEL;
-        }
-        else if (Stylus.Newpress && isGfxTouched(&eraser)) {
-          curColor = BGCOLOR;
-          drawToolBar(curColor);
-        }
-
-
-        break;
-      case STATE_COLORWHEEL:
-        if(!colorCounter){
-          BAG_Display_DrawObj(&ColorWheel, BAG_GetScreen(), (SCREEN_WIDTH - ColorWheel.data.width)>>1, 0);
-          colorCounter++;
-        }
-
-
-        if ((Stylus.Newpress || Stylus.Held) &&
-            BAG_StylusZone(ColorWheel.blitX, ColorWheel.blitY, ColorWheel.blitX +
-                           ColorWheel.data.width, ColorWheel.blitY + ColorWheel.data.height))
-          {
-            int posX = Stylus.X - ColorWheel.blitX,
-              posY = Stylus.Y - ColorWheel.blitY;
-
-            unsigned short tempCol = *BAG_Display_GetGfxPixelCol(&ColorWheel, posX, posY);
-            unsigned short alpha = *BAG_Display_GetGfxAlphaPix(&ColorWheel, posX, posY);
-            if(alpha > 0) {
-              curColor = tempCol;
-              drawToolBar(curColor);
-            }
-          }
-
-        else if (Stylus.Newpress && BAG_StylusZone(271, SCREEN_HEIGHT - ToolBar.data.height, 292, SCREEN_HEIGHT)) {
-          prgmState = STATE_MENU;
-          colorCounter = 0;
+      //user hits clear
+      else if (Stylus.Newpress && BAG_StylusZone(0, SCREEN_HEIGHT - ToolBar.data.height, 74, SCREEN_HEIGHT)) {
+        if (confirmationMenu("Clear the screen?\nThis action cannot be undone."))
           showToolBar(0);
-          showToolBar(1);
+        else
+          clearScreen();
+      }
+      //user wants new color
+      else if (isGfxTouched(&CurrentColSquare)) {
+        prgmState = STATE_COLORWHEEL;
+      }
+      else if (isGfxTouched(&Eraser)) {
+        curColor = BGCOLOR;
+        drawToolBar(curColor);
+      }
+      break;
+      /* User is selecting a color from the color wheel*/
+    case STATE_COLORWHEEL:
+      if(!colorCounter){
+        BAG_Display_DrawObj(&ColorWheel, BAG_GetScreen(), (SCREEN_WIDTH - ColorWheel.data.width)>>1, 0);
+        colorCounter++;
+      }
+
+      if ((Stylus.Newpress || Stylus.Held) &&
+          BAG_StylusZone(ColorWheel.blitX, ColorWheel.blitY, ColorWheel.blitX +
+                         ColorWheel.data.width, ColorWheel.blitY + ColorWheel.data.height))
+        {
+          int posX = Stylus.X - ColorWheel.blitX,
+            posY = Stylus.Y - ColorWheel.blitY;
+
+          unsigned short tempCol = *BAG_Display_GetGfxPixelCol(&ColorWheel, posX, posY);
+          unsigned short alpha = *BAG_Display_GetGfxAlphaPix(&ColorWheel, posX, posY);
+          if(alpha > 0) {
+            curColor = tempCol;
+            drawToolBar(curColor);
+          }
         }
 
-        break;
+      else if (Stylus.Newpress && BAG_StylusZone(271, SCREEN_HEIGHT - ToolBar.data.height, 292, SCREEN_HEIGHT)) {
+        prgmState = STATE_MENU;
+        colorCounter = 0;
+        showToolBar(0);
+        showToolBar(1);
       }
+      break;
+      
     }
     BAG_Update();
   } //while

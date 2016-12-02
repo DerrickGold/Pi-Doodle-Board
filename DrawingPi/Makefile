@@ -14,8 +14,9 @@ LDLIBS = $(LIBBAG)/lib/libbag.a
 all: src/DrawingPi
 	mv src/DrawingPi DrawingPi.bin
 
-src/DrawingPi: src/DrawingPi.o
-src/DrawingPi.o: src/DrawingPi.c
+src/DrawingPi: src/DrawingPi.o src/button.o
+src/DrawingPi.o: src/DrawingPi.c src/button.h
+src/button.o: src/button.c src/button.h
 
 
 clean:
