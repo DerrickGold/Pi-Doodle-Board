@@ -37,6 +37,11 @@ typedef enum PRGM_STATE {
   STATE_COLORWHEEL,
 } PRGM_STATE;
 
+typedef enum DRAW_STATE {
+  DRAW_NORMAL,
+  DRAW_FLOOD,
+} DRAW_STATE;
+
 //#define DO_BUFFER
 static FNTObj_t ArialFont;
 
@@ -46,6 +51,8 @@ static GFXObj_t MsgScreen = {0};
 static GFXObj_t ColorWheel = {0};
 static GFXObj_t Eraser = {0};
 static GFXObj_t CurrentColSquare = {0};
+static GFXObj_t Bucket = {0};
+
 
 static Button_t OKButton = {.font = &ArialFont};
 static Button_t CancelButton = {.font = &ArialFont};
@@ -98,6 +105,7 @@ static char loadResources(void) {
   loadGfx(&ToolBar, "graphics/toolbar.bmp");
   loadGfx(&ColorWheel, "graphics/colorwheel.bmp");
   loadGfx(&Eraser, "graphics/eraser.png");
+  loadGfx(&Bucket, "graphics/bucket.png");
 
   //disable using transparent color, 32bits have an alpha value to use
   BAG_Display_UseTransparentColor(&ColorWheel, 0);
@@ -179,7 +187,11 @@ static void drawToolBar(unsigned short color) {
   //refresh toolbar
   BAG_Display_DrawObjFast(&ToolBar, BAG_GetScreen(), 0, SCREEN_HEIGHT - ToolBar.data.height);
   drawCurColSqr(color);
+  
   BAG_Display_DrawObj(&Eraser, BAG_GetScreen(), 272 - 40, SCREEN_HEIGHT - ToolBar.data.height + 6);
+
+  int bucketX = *BAG_Display_GetGfxBlitX(&Eraser) - *BAG_Display_GetGfxFrameWd(&Bucket);
+  BAG_Display_DrawObj(&Bucket, BAG_GetScreen(), bucketX, SCREEN_HEIGHT - ToolBar.data.height);
 }
 
 
@@ -238,6 +250,20 @@ void setbacklight(int on) {
   system(tempPathBuf);
 }
 
+static void floodfill(unsigned short *dest, int wd, int ht, int x, int y, unsigned short oldcol, unsigned short newcol) {
+
+  if (oldcol == newcol || BAG_Draw_GetPixel(dest, wd, ht, x, y) != oldcol
+      || x < 0 || x >= wd || y < 0 || y >= ht) 
+    return;
+
+  //dest[x + (y * SCREEN_WIDTH)] = newcol;
+  BAG_Draw_BlitPixel(dest, wd, ht, x, y, newcol);
+  floodfill(dest, wd, ht, x - 1, y, oldcol, newcol);
+  floodfill(dest, wd, ht, x + 1, y, oldcol, newcol);
+  floodfill(dest, wd, ht, x, y - 1, oldcol, newcol);
+  floodfill(dest, wd, ht, x, y + 1, oldcol, newcol);
+}
+
 
 int main(int argc, char *argv[]){
   //get directory that this binary is running in
@@ -259,6 +285,7 @@ int main(int argc, char *argv[]){
   int colorCounter = 0, drawSize = 2;
   unsigned short curColor = DRAWCOLOR;
   int prgmState = STATE_MENU;
+  DRAW_STATE DrawTool = DRAW_NORMAL;
   int blankScreen = 0;
   time_t lastTouch = time(NULL);
   snprintf(saveDir, PATH_MAX, "%s/%s", rootPath, SAVE_DIR);
@@ -276,10 +303,20 @@ int main(int argc, char *argv[]){
     }
 
     switch(prgmState) {
-
       /*User is Currently Drawing...*/
     case STATE_DRAWING:
-      StylusDraw(BAG_GetScreen(), SCREEN_WIDTH, SCREEN_HEIGHT, curColor, drawSize);
+
+      switch(DrawTool) {
+      case DRAW_NORMAL:
+        StylusDraw(BAG_GetScreen(), SCREEN_WIDTH, SCREEN_HEIGHT, curColor, drawSize);
+        break;
+      case DRAW_FLOOD:{
+          unsigned short *buf = BAG_GetScreen();
+          unsigned short oldCol = buf[Stylus.X + (Stylus.Y * SCREEN_WIDTH)];
+          floodfill(buf, SCREEN_WIDTH, SCREEN_HEIGHT, Stylus.X, Stylus.Y, oldCol, curColor);
+      }break;
+      }
+      
       if(Stylus.Released) {
         //copy image before it gets destroyed
         showToolBar(1);
@@ -316,6 +353,9 @@ int main(int argc, char *argv[]){
       else if (isGfxTouched(&Eraser)) {
         curColor = BGCOLOR;
         drawToolBar(curColor);
+      }
+      else if (isGfxTouched(&Bucket)) {
+        DrawTool = (DrawTool == DRAW_NORMAL) ? DRAW_FLOOD : DRAW_NORMAL;
       }
       break;
       /* User is selecting a color from the color wheel*/

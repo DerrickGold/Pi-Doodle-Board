@@ -4,7 +4,7 @@
 	  var pollSeconds = 2000;
 		var reconnectTimeout = 10*1000;
   	window.onload = function() {
-    	init(true, false);
+    	init(false, false);
   	};
 
 		var apiCall = function(route, method, data, async, successCb, errorCb) {
@@ -73,12 +73,12 @@
       text-align: center;
     }
     img {
-    	display: block;
     	max-width: 480px;
     	width: 100%;
     	height: auto;
     	margin-right: auto;
     	margin-left: auto;
+      border: white 1px solid
     }
   </style>
 </head>

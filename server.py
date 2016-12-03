@@ -15,7 +15,7 @@ imgDir = './DrawingPi/images'
 historyCount = 25
 
 
-def scan_dir(directory, lastfile, page):
+def scan_dir(directory, flipped, lastfile, page):
     if lastfile is None: lastfile = ""
     if page is None: page = 0
     
@@ -27,8 +27,9 @@ def scan_dir(directory, lastfile, page):
             if f <= str(lastfile): continue
             listing.append(os.path.join(directory, f))
 
-    res = sorted(listing)[page:historyCount]
-    return res
+    res = sorted(listing)
+    res.reverse()
+    return res[page:historyCount]
 
 
 @app.route('/all', methods=['GET', 'POST'])
@@ -39,13 +40,12 @@ def getAll():
     if offset is None: offset = 0
     
     resp = {
-        'files': scan_dir(imgDir, lastfile, int(offset)),
+        'files': scan_dir(imgDir, flip, lastfile, int(offset)),
         'count': 0,
         'offset': offset,
         'limit': historyCount
     }
     resp['count'] = len(resp['files'])
-    if flip is not None: resp['files'].reverse()
     return jsonify(**resp)
 
 @app.route('/<path:filename>')
