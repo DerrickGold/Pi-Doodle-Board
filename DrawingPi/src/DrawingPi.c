@@ -8,6 +8,7 @@
 #include <time.h>
 #include <syslog.h>
 #include "button.h"
+#include "undo.h"
 //#include <system.h>
 
 //#define FPRINTF(stream, fmt, ...) fprintf(stream, fmt, ##__VA_ARGS__)
@@ -22,13 +23,20 @@
 #define FONTCOLOR RGB15(31, 63, 31)
 #define BUTTON_BG_COL RGB15(0, 0, 15)
 #define BUTTON_FG_COL RGB15(31, 63, 0)
+#define UNDO_LEVELS 10
+
 //shut backlight off after 120 seconds
 #define SLEEP_AFTER 120
+
 
 #define CURCOL_SQR_WD 28
 #define CURCOL_SQR_HT 28
 #define CURCOL_X 272
 #define CURCOL_Y (SCREEN_HEIGHT - 30)
+
+#define ICON_FRAME_WD 32
+#define ICON_FRAME_HT 32
+
 
 
 typedef enum PRGM_STATE {
@@ -39,8 +47,12 @@ typedef enum PRGM_STATE {
 
 typedef enum DRAW_STATE {
   DRAW_NORMAL,
+  DRAW_ERASE,
   DRAW_FLOOD,
 } DRAW_STATE;
+
+
+UndoBuffer undos = {0};
 
 //#define DO_BUFFER
 static FNTObj_t ArialFont;
@@ -52,14 +64,16 @@ static GFXObj_t ColorWheel = {0};
 static GFXObj_t Eraser = {0};
 static GFXObj_t CurrentColSquare = {0};
 static GFXObj_t Bucket = {0};
-
+static GFXObj_t UndoBtn = {0};
 
 static Button_t OKButton = {.font = &ArialFont};
 static Button_t CancelButton = {.font = &ArialFont};
 
-
 static char rootPath[PATH_MAX];
 static char saveDir[PATH_MAX];
+
+
+
 
 static void loadGfx(GFXObj_t *gfx, char *relpath) {
   char tempPathBuf[PATH_MAX];
@@ -105,8 +119,11 @@ static char loadResources(void) {
   loadGfx(&ToolBar, "graphics/toolbar.bmp");
   loadGfx(&ColorWheel, "graphics/colorwheel.bmp");
   loadGfx(&Eraser, "graphics/eraser.png");
+  BAG_Display_SetGfxFrameDim(&Eraser, ICON_FRAME_WD, ICON_FRAME_HT);
   loadGfx(&Bucket, "graphics/bucket.png");
-
+  BAG_Display_SetGfxFrameDim(&Bucket, ICON_FRAME_WD, ICON_FRAME_HT);
+  loadGfx(&UndoBtn, "graphics/undo.png");
+  
   //disable using transparent color, 32bits have an alpha value to use
   BAG_Display_UseTransparentColor(&ColorWheel, 0);
   BAG_Display_CreateObj(&Drawing, 16, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT);
@@ -183,15 +200,21 @@ static void drawCurColSqr(unsigned short color) {
   BAG_Display_DrawObjFast(&CurrentColSquare, BAG_GetScreen(), CURCOL_X, CURCOL_Y);  
 }
 
-static void drawToolBar(unsigned short color) {
+static void drawToolBar(DRAW_STATE curTool, unsigned short color) {
   //refresh toolbar
   BAG_Display_DrawObjFast(&ToolBar, BAG_GetScreen(), 0, SCREEN_HEIGHT - ToolBar.data.height);
   drawCurColSqr(color);
-  
-  BAG_Display_DrawObj(&Eraser, BAG_GetScreen(), 272 - 40, SCREEN_HEIGHT - ToolBar.data.height + 6);
+
+  int eraserX = *BAG_Display_GetGfxBlitX(&CurrentColSquare) - *BAG_Display_GetGfxFrameWd(&Eraser);
+  BAG_Display_SetObjFrame(&Eraser, FRAME_VERT, curTool == DRAW_ERASE);
+  BAG_Display_DrawObj(&Eraser, BAG_GetScreen(), eraserX, SCREEN_HEIGHT - ToolBar.data.height);
 
   int bucketX = *BAG_Display_GetGfxBlitX(&Eraser) - *BAG_Display_GetGfxFrameWd(&Bucket);
+  BAG_Display_SetObjFrame(&Bucket, FRAME_VERT, curTool == DRAW_FLOOD);
   BAG_Display_DrawObj(&Bucket, BAG_GetScreen(), bucketX, SCREEN_HEIGHT - ToolBar.data.height);
+
+  int undoX = *BAG_Display_GetGfxBlitX(&Bucket) - *BAG_Display_GetGfxFrameWd(&Bucket);
+  BAG_Display_DrawObj(&UndoBtn, BAG_GetScreen(), undoX, SCREEN_HEIGHT - ToolBar.data.height);
 }
 
 
@@ -200,6 +223,7 @@ static void clearScreen(void) {
   BAG_ClearScreen(BGCOLOR);
   BAG_Update();
   BAG_ClearScreen(BGCOLOR);
+  Undo_Add(&undos, BAG_GetScreen());
   showToolBar(1);
 }
 
@@ -278,6 +302,9 @@ int main(int argc, char *argv[]){
 
   BAG_Core_SetFPS(FRAME_RATE);
   BAG_DBG_Init(NULL, DBG_ENABLE | DBG_LIB);
+
+  
+  Undo_Init(&undos, UNDO_LEVELS, (SCREEN_WIDTH * SCREEN_HEIGHT));
   
   loadResources();
   clearScreen();
@@ -285,7 +312,7 @@ int main(int argc, char *argv[]){
   int colorCounter = 0, drawSize = 2;
   unsigned short curColor = DRAWCOLOR;
   int prgmState = STATE_MENU;
-  DRAW_STATE DrawTool = DRAW_NORMAL;
+  DRAW_STATE drawTool = DRAW_NORMAL, lastTool = DRAW_NORMAL;
   int blankScreen = 0;
   time_t lastTouch = time(NULL);
   snprintf(saveDir, PATH_MAX, "%s/%s", rootPath, SAVE_DIR);
@@ -306,9 +333,12 @@ int main(int argc, char *argv[]){
       /*User is Currently Drawing...*/
     case STATE_DRAWING:
 
-      switch(DrawTool) {
+      switch(drawTool) {
       case DRAW_NORMAL:
         StylusDraw(BAG_GetScreen(), SCREEN_WIDTH, SCREEN_HEIGHT, curColor, drawSize);
+        break;
+      case DRAW_ERASE:
+        StylusDraw(BAG_GetScreen(), SCREEN_WIDTH, SCREEN_HEIGHT, BGCOLOR, drawSize);
         break;
       case DRAW_FLOOD:{
           unsigned short *buf = BAG_GetScreen();
@@ -318,6 +348,7 @@ int main(int argc, char *argv[]){
       }
       
       if(Stylus.Released) {
+        Undo_Add(&undos, BAG_GetScreen());
         //copy image before it gets destroyed
         showToolBar(1);
         prgmState = STATE_MENU;
@@ -326,7 +357,7 @@ int main(int argc, char *argv[]){
       
       /*Stylus is off the screen and or re-entered in toolbar area*/
     case STATE_MENU:
-      drawToolBar(curColor);
+      drawToolBar(drawTool, curColor);
       //user starts drawing again, hide toolbar
       if(Stylus.Newpress && !BAG_StylusZone(0, SCREEN_HEIGHT - ToolBar.data.height, SCREEN_WIDTH, SCREEN_HEIGHT)){
         showToolBar(0);
@@ -351,11 +382,14 @@ int main(int argc, char *argv[]){
         prgmState = STATE_COLORWHEEL;
       }
       else if (isGfxTouched(&Eraser)) {
-        curColor = BGCOLOR;
-        drawToolBar(curColor);
+        drawTool = (drawTool == DRAW_ERASE) ? DRAW_NORMAL: DRAW_ERASE;
       }
       else if (isGfxTouched(&Bucket)) {
-        DrawTool = (DrawTool == DRAW_NORMAL) ? DRAW_FLOOD : DRAW_NORMAL;
+        drawTool = (drawTool == DRAW_FLOOD) ? DRAW_NORMAL: DRAW_FLOOD;
+      }
+      else if (isGfxTouched(&UndoBtn)) {
+        Undo_Revert(BAG_GetScreen(), &undos);
+        showToolBar(1);
       }
       break;
       /* User is selecting a color from the color wheel*/
@@ -376,7 +410,7 @@ int main(int argc, char *argv[]){
           unsigned short alpha = *BAG_Display_GetGfxAlphaPix(&ColorWheel, posX, posY);
           if(alpha > 0) {
             curColor = tempCol;
-            drawToolBar(curColor);
+            drawToolBar(drawTool, curColor);
           }
         }
 
