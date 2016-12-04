@@ -37,6 +37,12 @@
 #define ICON_FRAME_WD 32
 #define ICON_FRAME_HT 32
 
+#define SET_TWITTER_ENV() do {                                          \
+  setenv("TWITTER_API_KEY", getenv("TWITTER_API_KEY"), 1);              \
+  setenv("TWITTER_API_SECRET", getenv("TWITTER_API_SECRET"), 1);        \
+  setenv("TWITTER_TOKEN", getenv("TWITTER_TOKEN"), 1);                  \
+  setenv("TWITTER_TOKEN_SECRET", getenv("TWITTER_TOKEN_SECRET"), 1);    \
+  } while (0)
 
 
 typedef enum PRGM_STATE {
@@ -235,19 +241,36 @@ static int confirmationMenu(char *msg) {
   Button_Draw(&CancelButton, SCREEN_WIDTH/2 + SCREEN_WIDTH/4, SCREEN_HEIGHT/2 + (SCREEN_HEIGHT/4),
               BUTTON_BG_COL, BUTTON_FG_COL);
 
-  int status = 0;
-  while (1) {
+  int status = 1;
+  while (status == 1) {
 
     if (Button_isTouched(&OKButton))
-      break;
-    else if (Button_isTouched(&CancelButton)) {
+      status = 0;
+    else if (Button_isTouched(&CancelButton))
       status = -1;
-      break;
-    }
 
     BAG_Update();
   }
+
+  //make sure input is cleared
+  BAG_Update();
   return status;
+}
+
+static void tweetNote(char *filename) {
+  if (confirmationMenu("Would you like @PiDoodleBot to tweet this doodle?")) {
+    showToolBar(0);
+    return;
+  }
+
+  createMessage("Tweeting Doodle...");
+  drawMessageScreen();
+  
+  char tempPathBuf[PATH_MAX];
+  snprintf(tempPathBuf, PATH_MAX, "/usr/bin/python3 %s/tweet.py \"%s/%s.bmp\"", rootPath, saveDir, filename);
+  syslog(LOG_INFO, "Command: %s\n", tempPathBuf);
+  system(tempPathBuf);
+  showToolBar(0);
 }
 
 static void saveNote(void) {
@@ -264,7 +287,7 @@ static void saveNote(void) {
   snprintf(savename, PATH_MAX, "%lu", (unsigned long)time(NULL));
   BAG_Display_GfxToBitmapFile(&Drawing, saveDir, savename);
   sleep(2);
-  showToolBar(0);
+  tweetNote(savename);
 }
 
 void setbacklight(int on) {
@@ -299,7 +322,8 @@ int main(int argc, char *argv[]){
     printf("Init error...\n");
     BAG_Exit(0);
   }
-
+  SET_TWITTER_ENV();
+  
   BAG_Core_SetFPS(FRAME_RATE);
   BAG_DBG_Init(NULL, DBG_ENABLE | DBG_LIB);
 

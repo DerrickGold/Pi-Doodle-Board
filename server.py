@@ -24,8 +24,10 @@ def scan_dir(directory, flipped, lastfile, page):
     for root,dirs,files in os.walk(os.path.normpath(directory)):
         del(dirs[:])        
         for f in files:
-            if f <= str(lastfile): continue
-            listing.append(os.path.join(directory, f))
+            ext = os.path.splitext(f)
+            if ext[1] == ".bmp":
+                if f <= str(lastfile): continue
+                listing.append(os.path.join(directory, f))
 
     res = sorted(listing)
     res.reverse()
