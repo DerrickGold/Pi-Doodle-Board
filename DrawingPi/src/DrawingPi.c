@@ -9,6 +9,8 @@
 #include <syslog.h>
 #include "button.h"
 #include "undo.h"
+#include "keyboard.h"
+
 //#include <system.h>
 
 //#define FPRINTF(stream, fmt, ...) fprintf(stream, fmt, ##__VA_ARGS__)
@@ -24,6 +26,7 @@
 #define BUTTON_BG_COL RGB15(0, 0, 15)
 #define BUTTON_FG_COL RGB15(31, 63, 0)
 #define UNDO_LEVELS 10
+#define HASHTAG_CHAR_LIM 98
 
 //shut backlight off after 120 seconds
 #define SLEEP_AFTER 120
@@ -36,6 +39,9 @@
 
 #define ICON_FRAME_WD 32
 #define ICON_FRAME_HT 32
+
+#define BUTTON_WD 64
+#define BUTTON_HT 40
 
 #define SET_TWITTER_ENV() do {                                          \
   setenv("TWITTER_API_KEY", getenv("TWITTER_API_KEY"), 1);              \
@@ -60,6 +66,7 @@ typedef enum DRAW_STATE {
 
 UndoBuffer undos = {0};
 
+static keyboard_t kb;
 //#define DO_BUFFER
 static FNTObj_t ArialFont;
 
@@ -75,11 +82,11 @@ static GFXObj_t UndoBtn = {0};
 static Button_t OKButton = {.font = &ArialFont};
 static Button_t CancelButton = {.font = &ArialFont};
 
+static TextBox_t hashtagbox = {0};
+
+
 static char rootPath[PATH_MAX];
 static char saveDir[PATH_MAX];
-
-
-
 
 static void loadGfx(GFXObj_t *gfx, char *relpath) {
   char tempPathBuf[PATH_MAX];
@@ -100,7 +107,7 @@ static void loadFnt(FNTObj_t *fnt, char *relpath) {
   BAG_Font_SetFontColor(&ArialFont, FONTCOLOR);
 }
 
-static void createMessage(char *message) {
+static void createMessage(char *message, char isTitle) {
   if (!MsgScreen.buffer.gfx)
     BAG_Display_CreateObj(&MsgScreen, 16, SCREEN_WIDTH, SCREEN_HEIGHT, SCREEN_WIDTH, SCREEN_HEIGHT);
   
@@ -110,6 +117,8 @@ static void createMessage(char *message) {
   TextBox_t ScreenBox = {
     0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, ALIGN_CENTER, WRAP_WORD, TBOX_WHOLESTR
   };
+  ScreenBox.y2 = (isTitle) ? 32 : SCREEN_HEIGHT;
+  
   BAG_Draw_Rect(MsgScreen.buffer.gfx, SCREEN_WIDTH, SCREEN_HEIGHT, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT, RGB15(0,0,0));
   BAG_Font_Print2(MsgScreen.buffer.gfx, &ScreenBox, &msgText, &ArialFont);
   msgText.del(&msgText);
@@ -139,10 +148,22 @@ static char loadResources(void) {
   BAG_Display_UseTransparentColor(&CurrentColSquare, 0);
   
   //make some buttons
-  Button_Create(SCREEN_HEIGHT>>3, 40, "Yes", &OKButton);
-  Button_Create(SCREEN_HEIGHT>>3, 40, "No", &CancelButton);
-}
+  Button_Create(BUTTON_WD, BUTTON_HT, "Yes", &OKButton);
+  Button_Create(BUTTON_WD, BUTTON_HT, "No", &CancelButton);
 
+  //prepare the keyboard
+  Keyboard_Init(&kb, &ArialFont, RGB15(0, 0, 31), RGB15(31, 63, 31), RGB15(31, 0, 0), RGB15(0, 31, 0));
+  Keyboard_TileSize(&kb, 39);
+  int kbY = SCREEN_HEIGHT - (5 * 39);
+  Keyboard_SetXY(&kb, 0, kbY);
+  hashtagbox = (TextBox_t) {
+    0, kbY - 32,//x1, y1
+    SCREEN_WIDTH, kbY,//x2, y2
+    ALIGN_LEFT,//text alignment (ALIGN_LEFT, ALIGN_RIGHT, ALIGN_CENTER)
+    WRAP_WORD,//text wrapping mode (WRAP_NONE, WRAP_LETTER, WRAP_WORD)
+    TBOX_WHOLESTR,//print whole string, otherwise specify a numerical number of characters to print
+  };
+}
 
 
 static char isGfxTouched(GFXObj_t *gfx) {
@@ -234,7 +255,7 @@ static void clearScreen(void) {
 }
 
 static int confirmationMenu(char *msg) {
-  createMessage(msg);
+  createMessage(msg, 0);
   drawMessageScreen();
   Button_Draw(&OKButton, SCREEN_WIDTH>>2, SCREEN_HEIGHT/2 + (SCREEN_HEIGHT/4),
               BUTTON_BG_COL, BUTTON_FG_COL);
@@ -257,17 +278,70 @@ static int confirmationMenu(char *msg) {
   return status;
 }
 
+static int addHashTag(int outlen, char *outbuf) {
+
+  createMessage("Hashtag this tweet?", 1);
+  wString hashtags = {0};
+  wString_new(&hashtags);
+  int status = 1;
+  char *bufStart = outbuf;
+  char *bufEnd = outbuf + outlen;
+  
+  while (status == 1) {
+    if (Stylus.Newpress) {
+      char letter = Keyboard_Check(&kb);
+      switch(letter) {
+      case 0: break;
+      default:
+        if (bufStart < bufEnd)
+          *bufStart++ = letter; 
+        break;
+      case BACKSPACE:
+        if (bufStart > outbuf) {
+          bufStart--;
+        	*bufStart = '\0';
+        }
+        break;
+      case ENTER: break;
+      }
+    } else if (Stylus.Released) {
+      kb.pressed = -1;
+    }
+
+    if (Button_isTouched(&OKButton))
+      status = 0;
+    else if (Button_isTouched(&CancelButton))
+      status = -1;
+
+    
+    drawMessageScreen();
+    Keyboard_Draw(BAG_GetScreen(), SCREEN_WIDTH, SCREEN_HEIGHT, &kb);
+    
+    Button_Draw(&OKButton, 0, 32, BUTTON_BG_COL, BUTTON_FG_COL);
+    Button_Draw(&CancelButton, SCREEN_WIDTH - BUTTON_WD, 32, BUTTON_BG_COL, BUTTON_FG_COL);
+    
+    hashtags.printf(&hashtags, "Your Tags: %s", outbuf);
+    BAG_Font_Print2(BAG_GetScreen(), &hashtagbox, &hashtags, &ArialFont);
+    BAG_Update();
+  }
+  
+  return status;
+}
+
 static void tweetNote(char *filename) {
   if (confirmationMenu("Would you like @PiDoodleBot to tweet this doodle?")) {
     showToolBar(0);
     return;
   }
 
-  createMessage("Tweeting Doodle...");
+  char tags[HASHTAG_CHAR_LIM] = {0};
+  int doHash = addHashTag(HASHTAG_CHAR_LIM, tags);
+  if (doHash) tags[0] = '\0';
+  createMessage("Tweeting Doodle...", 0);
   drawMessageScreen();
   
   char tempPathBuf[PATH_MAX];
-  snprintf(tempPathBuf, PATH_MAX, "/usr/bin/python3 %s/tweet.py \"%s/%s.bmp\"", rootPath, saveDir, filename);
+  snprintf(tempPathBuf, PATH_MAX, "/usr/bin/python3 %s/tweet.py \"%s/%s.bmp\" \"%s\"", rootPath, saveDir, filename, tags);
   syslog(LOG_INFO, "Command: %s\n", tempPathBuf);
   system(tempPathBuf);
   showToolBar(0);
@@ -280,7 +354,7 @@ static void saveNote(void) {
     return;
   }
   
-  createMessage("Posting Doodle...");
+  createMessage("Posting Doodle...", 0);
   drawMessageScreen();
 
   char savename[PATH_MAX];
@@ -296,6 +370,9 @@ void setbacklight(int on) {
   syslog(LOG_INFO, "Command: %s\n", tempPathBuf);
   system(tempPathBuf);
 }
+
+
+
 
 static void floodfill(unsigned short *dest, int wd, int ht, int x, int y, unsigned short oldcol, unsigned short newcol) {
 

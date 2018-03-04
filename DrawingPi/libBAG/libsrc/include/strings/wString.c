@@ -480,7 +480,8 @@ static void wString_vsprintf(wString *string, const char *text, va_list *vl){
             else if(text[i+1] == 's'){
                 i++;
                 char *input  = va_arg(*vl, char*);
-                trueLen += copyCharToU16(&string->array[trueLen], wString_getLen(string) - trueLen, input);
+                if (strlen(input) > 0)
+                  trueLen += copyCharToU16(&string->array[trueLen], wString_getLen(string) - trueLen, input);
                 continue;
             }
             //found a wide string
